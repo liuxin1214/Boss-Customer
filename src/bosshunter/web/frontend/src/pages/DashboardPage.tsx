@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useDashboard, type CollectionProgress, type HistoryItem, type Job, type WorkbenchTask } from '@/hooks/useDashboard'
 import { useJobSearch, type JobSortKey, type JobSortOrder } from '@/hooks/useJobSearch'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { JobsTable } from '@/components/dashboard/JobsTable'
 import { RecycleBinPanel } from '@/components/dashboard/RecycleBinPanel'
 import { ScoreJobsDialog } from '@/components/dashboard/ScoreJobsDialog'
@@ -613,6 +614,9 @@ export default function DashboardPage({ view = 'workbench' }: DashboardPageProps
         refresh={refresh}
         refreshing={refreshing}
         lastRefreshedAt={lastRefreshedAt}
+        activeTask={activeTask}
+        onToggleMonitor={() => void handleModeClick('monitor')}
+        modePending={modePending}
       />
     )
   }
@@ -1589,12 +1593,70 @@ function MonitorExecutionView({
   refresh,
   refreshing,
   lastRefreshedAt,
+  activeTask,
+  onToggleMonitor,
+  modePending,
 }: {
   history: HistoryItem[]
   refresh: () => Promise<void>
   refreshing: boolean
   lastRefreshedAt: Date | null
+  activeTask?: WorkbenchTask | null
+  onToggleMonitor?: () => void
+  modePending?: WorkbenchMode | null
 }) {
+  const [checkAllChats, setCheckAllChats] = useState(false)
+  const [savingCheckAllChats, setSavingCheckAllChats] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const fetchCheckAllChats = async () => {
+      try {
+        const res = await fetch('/api/monitor/check-all-chats')
+        if (!res.ok) return
+        const data = await res.json()
+        if (!cancelled && typeof data.check_all_chats === 'boolean') {
+          setCheckAllChats(data.check_all_chats)
+        }
+      } catch {
+        // ignore
+      }
+    }
+    void fetchCheckAllChats()
+    const handleConfigSaved = () => { void fetchCheckAllChats() }
+    window.addEventListener('bosshunter-config-saved', handleConfigSaved)
+    return () => {
+      cancelled = true
+      window.removeEventListener('bosshunter-config-saved', handleConfigSaved)
+    }
+  }, [])
+
+  const handleToggleCheckAllChats = async (checked: boolean) => {
+    setSavingCheckAllChats(true)
+    try {
+      const res = await fetch('/api/monitor/check-all-chats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ check_all_chats: checked }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || '切换失败')
+      }
+      setCheckAllChats(checked)
+      setNotice(
+        checked
+          ? '已开启「检测所有聊天」，监测时将扫描聊天列表中的所有对话（包括移动端发起或非系统投递的沟通记录）。'
+          : '已关闭「检测所有聊天」，仅监测系统投递过的岗位对话。'
+      )
+      window.dispatchEvent(new Event('bosshunter-config-saved'))
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : '开关切换失败')
+    } finally {
+      setSavingCheckAllChats(false)
+    }
+  }
+
   const pendingReplies = uniqueLatestByJob(history.filter(item =>
     item.action === 'reply_pending' && !isReplyPendingResolved(item, history)
   ))
@@ -1709,9 +1771,54 @@ function MonitorExecutionView({
       <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-2xl font-black">监测执行</h2>
-          <p className="mt-1 text-sm text-muted">这里不启动监测，只处理监测发现的 HR 问题、回复建议和结果。</p>
+          <p className="mt-1 text-sm text-muted">
+            {checkAllChats
+              ? '已开启全量检测：监控 BOSS 聊天中的所有 HR 回复、要简历请求和建议。'
+              : '监控已投递岗位与 BOSS 聊天中的 HR 回复、要简历请求和建议。'}
+          </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {activeTask?.mode === 'monitor' ? (
+            <>
+              <span className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-black text-emerald-600">
+                <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                监测运行中
+              </span>
+              {onToggleMonitor && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onToggleMonitor}
+                  disabled={Boolean(modePending)}
+                  className="text-danger hover:text-danger"
+                >
+                  <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
+                  停止监测
+                </Button>
+              )}
+            </>
+          ) : activeTask ? (
+            <span className="rounded-full bg-[#FFF0E5] px-3 py-1.5 text-xs font-black text-primary">
+              {activeTask.label}运行中
+            </span>
+          ) : (
+            <>
+              <span className="rounded-full bg-gray-100 px-3 py-1.5 text-xs font-medium text-muted">
+                当前空闲
+              </span>
+              {onToggleMonitor && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onToggleMonitor}
+                  disabled={Boolean(modePending)}
+                >
+                  <Play className="mr-1.5 h-3.5 w-3.5 fill-current" />
+                  启动监测
+                </Button>
+              )}
+            </>
+          )}
           <span className="text-xs text-muted">
             {lastRefreshedAt ? `更新于 ${lastRefreshedAt.toLocaleTimeString('zh-CN', { hour12: false })}` : '正在读取'} · 每 2 秒刷新
           </span>
@@ -1720,6 +1827,39 @@ function MonitorExecutionView({
             {refreshing ? '刷新中' : '立即刷新'}
           </Button>
           <span className="rounded-full bg-[#FFF0E5] px-3 py-2 text-xs font-black text-primary">待处理 {pendingItems.length}</span>
+        </div>
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-card-border bg-[#FFFCFA] p-4 transition-all hover:border-primary/40">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <MessageCircle className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-foreground">检测所有聊天</span>
+              <span
+                className={cn(
+                  'rounded-full px-2 py-0.5 text-xs font-semibold',
+                  checkAllChats ? 'bg-primary/10 text-primary' : 'bg-gray-100 text-muted'
+                )}
+              >
+                {checkAllChats ? '已开启' : '已关闭'}
+              </span>
+            </div>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              {checkAllChats
+                ? '开启状态：监测将扫描 BOSS 聊天列表中的所有对话（包括移动端发起或非系统投递的沟通记录），发现 HR 回复或要求简历自动提取并生成建议。'
+                : '关闭状态：仅监测系统已投递记录中的岗位对话；其它沟通对话将被忽略。打开后可检测全部对话。'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <Switch
+            checked={checkAllChats}
+            disabled={savingCheckAllChats}
+            onChange={handleToggleCheckAllChats}
+          />
         </div>
       </div>
       <div className="mb-4 flex flex-wrap gap-2">

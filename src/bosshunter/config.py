@@ -174,6 +174,7 @@ DEFAULTS: dict[str, Any] = {
         "max_consecutive_page_failures": 3,
         "max_resume_sends_per_cycle": 5,
         "auto_reply_hr_questions": False,
+        "check_all_chats": False,
     },
     "follow_up": {
         "enabled": False,

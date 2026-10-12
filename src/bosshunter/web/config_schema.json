@@ -118,7 +118,8 @@
         {"key": "max_conversations_per_cycle", "label": "每轮最多处理对话数", "type": "number", "min": 1, "max": 20, "default": 5},
         {"key": "max_consecutive_page_failures", "label": "连续页面失败停止阈值", "type": "number", "min": 1, "max": 10, "default": 3},
         {"key": "max_resume_sends_per_cycle", "label": "每轮最多发简历数", "type": "number", "min": 1, "max": 20, "default": 5},
-        {"key": "auto_reply_hr_questions", "label": "检测到 HR 问题时自动回复", "type": "switch", "default": false, "description": "关闭时只生成回复建议，需要在监测执行中确认后发送"}
+        {"key": "auto_reply_hr_questions", "label": "检测到 HR 问题时自动回复", "type": "switch", "default": false, "description": "关闭时只生成回复建议，需要在监测执行中确认后发送"},
+        {"key": "check_all_chats", "label": "检测所有聊天", "type": "switch", "default": false, "description": "打开后将监测聊天列表中的所有对话，即使未在平台投递记录中"}
       ]
     },
     {

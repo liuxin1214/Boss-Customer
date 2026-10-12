@@ -1,7 +1,8 @@
 """Monitor module - Watch for HR replies, auto-reply, and send resumes."""
 
-import time
+import hashlib
 import json
+import time
 
 from rich.console import Console
 
@@ -16,6 +17,7 @@ from bosshunter.cancellation import (
 from bosshunter.db import (
     get_db, get_jobs_by_status,
     update_job_status, add_history, add_risk_event, set_platform_safety_lock,
+    insert_job_if_new,
 )
 from bosshunter.throttle import RequestThrottle, SendWindowChecker
 from bosshunter.platform_safety import (
@@ -1182,26 +1184,34 @@ def _check_boss_replies(config: dict, tracked_jobs: list[dict] | None = None) ->
         return []
     monitor_cfg = config.get("monitor", {})
     chat_url = monitor_cfg.get("chat_url", "https://www.zhipin.com/web/geek/chat")
+    check_all_chats = bool(monitor_cfg.get("check_all_chats", False))
 
     # Get jobs we've sent greetings to (or already replied/resume_sent/follow_up_sent/needs_resume - keep monitoring)
     if tracked_jobs is None:
-        sent_jobs = get_jobs_by_status(db, "sent")
-        replied_jobs = get_jobs_by_status(db, "replied")
-        resume_sent_jobs = get_jobs_by_status(db, "resume_sent")
-        follow_up_jobs = get_jobs_by_status(db, "follow_up_sent")
-        needs_resume_jobs = get_jobs_by_status(db, "needs_resume")
-        tracked_jobs = sent_jobs + replied_jobs + resume_sent_jobs + follow_up_jobs + needs_resume_jobs
+        if check_all_chats:
+            rows = db.execute("SELECT * FROM jobs WHERE deleted_at IS NULL").fetchall()
+            tracked_jobs = [dict(row) for row in rows]
+        else:
+            sent_jobs = get_jobs_by_status(db, "sent")
+            replied_jobs = get_jobs_by_status(db, "replied")
+            resume_sent_jobs = get_jobs_by_status(db, "resume_sent")
+            follow_up_jobs = get_jobs_by_status(db, "follow_up_sent")
+            needs_resume_jobs = get_jobs_by_status(db, "needs_resume")
+            tracked_jobs = sent_jobs + replied_jobs + resume_sent_jobs + follow_up_jobs + needs_resume_jobs
     all_tracked_jobs = [
         job for job in tracked_jobs
         if str(job.get("source_platform") or "boss").strip().lower() == "boss"
     ]
 
-    if not all_tracked_jobs:
+    if not all_tracked_jobs and not check_all_chats:
         console.print("[dim]没有需要监测的对话[/dim]")
         db.close()
         return []
 
-    console.print(f"[bold]监测 {len(all_tracked_jobs)} 个对话的回复情况...[/bold]")
+    if check_all_chats:
+        console.print("[bold]检测所有聊天模式已开启，将扫描聊天列表中的所有对话...[/bold]")
+    else:
+        console.print(f"[bold]监测 {len(all_tracked_jobs)} 个对话的回复情况...[/bold]")
 
     # Open chat page
     target_id, reused_chat_target = _get_monitor_chat_target(chat_url, config)
@@ -1287,10 +1297,40 @@ def _check_boss_replies(config: dict, tracked_jobs: list[dict] | None = None) ->
     except (TypeError, ValueError):
         max_conversations = 5
     results = []
+    all_db_jobs = []
+    if check_all_chats:
+        rows = db.execute("SELECT * FROM jobs WHERE deleted_at IS NULL").fetchall()
+        all_db_jobs = [dict(row) for row in rows]
+
     for conv in conversations:
         if stop_requested(config):
             break
         matched_job = _match_conversation_to_job(conv, all_tracked_jobs)
+        if not matched_job and check_all_chats:
+            matched_job = _match_conversation_to_job(conv, all_db_jobs)
+            if not matched_job:
+                conv_company = (conv.get("company") or "").strip()
+                conv_hr = (conv.get("hr_name") or "").strip()
+                if conv_company or conv_hr:
+                    digest = hashlib.md5(f"{conv_company}_{conv_hr}".encode("utf-8")).hexdigest()[:12]
+                    job_id = f"boss_chat_{digest}"
+                    existing_row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                    if existing_row:
+                        matched_job = dict(existing_row)
+                    else:
+                        new_job = {
+                            "id": job_id,
+                            "title": conv.get("hr_title") or "沟通职位",
+                            "company": conv_company or "未知企业",
+                            "hr_name": conv_hr,
+                            "hr_title": conv.get("hr_title") or "",
+                            "status": "sent",
+                            "source_platform": "boss",
+                            "url": chat_url,
+                        }
+                        insert_job_if_new(db, new_job)
+                        matched_job = new_job
+                        all_db_jobs.append(matched_job)
         if matched_job:
             is_outbound = (
                 conv.get("last_direction") == "me"
@@ -1363,20 +1403,29 @@ def _check_boss_replies(config: dict, tracked_jobs: list[dict] | None = None) ->
 
 def check_replies(config: dict) -> list[dict]:
     """Check BOSS replies; collection-only platforms never enter chat flows."""
+    check_all_chats = bool(config.get("monitor", {}).get("check_all_chats", False))
     db = get_db()
     try:
-        tracked = []
-        for status in ("sent", "replied", "resume_sent", "follow_up_sent", "needs_resume"):
-            tracked.extend(get_jobs_by_status(db, status))
+        requested_ids = {
+            str(job_id)
+            for job_id in config.get("_monitor_job_ids", [])
+            if str(job_id)
+        }
+        if requested_ids:
+            tracked = []
+            for jid in requested_ids:
+                row = db.execute("SELECT * FROM jobs WHERE id = ? AND deleted_at IS NULL", (jid,)).fetchone()
+                if row:
+                    tracked.append(dict(row))
+        elif check_all_chats:
+            rows = db.execute("SELECT * FROM jobs WHERE deleted_at IS NULL").fetchall()
+            tracked = [dict(row) for row in rows]
+        else:
+            tracked = []
+            for status in ("sent", "replied", "resume_sent", "follow_up_sent", "needs_resume"):
+                tracked.extend(get_jobs_by_status(db, status))
     finally:
         db.close()
-    requested_ids = {
-        str(job_id)
-        for job_id in config.get("_monitor_job_ids", [])
-        if str(job_id)
-    }
-    if requested_ids:
-        tracked = [job for job in tracked if str(job.get("id") or "") in requested_ids]
     boss_results = _check_boss_replies(config, tracked)
     return boss_results
 
@@ -1990,6 +2039,9 @@ def _check_follow_ups(config: dict, throttle, replied_job_ids: set | None = None
     cutoff = datetime.now() - timedelta(hours=interval_hours)
     stale_jobs = []
     for job in sent_jobs:
+        # Skip conversations synthesized from chat scanning
+        if str(job.get("id") or "").startswith("boss_chat_"):
+            continue
         # Skip any job that already had an HR reply this cycle
         if replied_job_ids and job["id"] in replied_job_ids:
             console.print(f"[dim]  跟进跳过（本轮已有HR回复）: {job['company']}[/dim]")

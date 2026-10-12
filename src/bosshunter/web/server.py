@@ -521,7 +521,10 @@ def _execute_monitor(task: WorkbenchTask, config: dict, *, initial_cooldown: boo
 				_execute_deliver(task, deliver_config)
 				if task.stop_requested.is_set():
 					return
-			_log(task, "执行一轮监测")
+			latest_cfg = load_config(CONFIG_PATH)
+			monitor_config["monitor"] = latest_cfg.get("monitor", {})
+			is_all_chats = bool(monitor_config["monitor"].get("check_all_chats"))
+			_log(task, f"执行一轮监测{'（检测所有聊天）' if is_all_chats else ''}")
 			summary = monitor_and_send_resumes(monitor_config)
 			if task.stop_requested.is_set():
 				return
@@ -1205,6 +1208,29 @@ def api_history_prepare_reply(history_id):
 		if not processed:
 			return _json_response({"error": "没有找到对应的新 HR 对话，请先用“打开聊天对话”检查"}, 404)
 		return _json_response({"success": True, "summary": summary})
+
+
+@app.route("/api/monitor/check-all-chats")
+def api_monitor_get_check_all_chats():
+	try:
+		config = load_config(CONFIG_PATH)
+		check_all = bool(config.get("monitor", {}).get("check_all_chats", False))
+		return _json_response({"check_all_chats": check_all})
+	except Exception as e:
+		return _json_response({"error": str(e)}, 500)
+
+
+@app.route("/api/monitor/check-all-chats", method="POST")
+def api_monitor_post_check_all_chats():
+	try:
+		data = request.json or {}
+		check_all = bool(data.get("check_all_chats", False))
+		config = load_config(CONFIG_PATH)
+		config.setdefault("monitor", {})["check_all_chats"] = check_all
+		_write_config(config)
+		return _json_response({"success": True, "check_all_chats": check_all})
+	except Exception as e:
+		return _json_response({"error": str(e)}, 500)
 
 
 @app.route("/api/workbench")

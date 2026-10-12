@@ -124,6 +124,7 @@ monitor:
   max_consecutive_page_failures: 3
   max_resume_sends_per_cycle: 5
   auto_reply_hr_questions: false
+  check_all_chats: false
 
 follow_up:
   enabled: false
