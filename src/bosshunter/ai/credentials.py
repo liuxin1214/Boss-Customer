@@ -576,7 +576,12 @@ def call_openai_compatible_text(
         try:
             response = httpx.post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                # opencode zen 网关要求携带会话标识，其他兼容服务商会忽略该头
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "x-opencode-session": "bosshunter",
+                },
                 json=payload,
                 timeout=request_timeout,
                 trust_env=False,

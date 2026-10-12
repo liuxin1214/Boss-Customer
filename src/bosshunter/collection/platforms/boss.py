@@ -205,6 +205,16 @@ def generate_boss_job_id(url: str) -> str:
     return hashlib.md5(str(url or "").encode()).hexdigest()[:16]
 
 
+# BOSS 反爬：薪资数字用图标字体渲染，DOM 文本为私有区字形 -（0-9）。
+# 映射通过页面上"字形→明文数字"的对照岗位（如标题含 8-13k 的岗位）交叉验证得出。
+_ICONFONT_DIGITS = {chr(0xE031 + i): str(i) for i in range(10)}
+
+
+def decode_iconfont_salary(text: str) -> str:
+    """把 salary 文本中的私有区字形翻译回数字；页面改版可能改用其他 scheme，超出 E031-E03A 的忽略。"""
+    return "".join(_ICONFONT_DIGITS.get(ch, ch) for ch in str(text or ""))
+
+
 def _wait_or_stop(stop_event, seconds: float, sleep: Callable[[float], None] = time.sleep) -> bool:
     if stop_event is not None:
         return stop_event.wait(seconds)
@@ -465,7 +475,10 @@ class BossCollector:
                             return PlatformCollectionResult(self.platform, "stopped", "user_stopped", "用户已停止")
                         candidate = self._list_candidate(raw, city, city_code, keyword)
                         if not candidate or not hooks.on_list_candidate(candidate): continue
-                        if self.config and quick_score(raw if isinstance(raw, dict) else {}, self.config)[0] <= 0:
+                        # 预筛必须用解码后的 salary：raw 里是图标字体字形，quick_score 解析不了
+                        if self.config and quick_score(
+                            {**raw, "salary": candidate.salary} if isinstance(raw, dict) else {}, self.config,
+                        )[0] <= 0:
                             hooks.on_event(message="BOSS 列表预筛不通过", increment_filtered=True)
                             continue
                         if throttle.wait(hooks.stop_event):
@@ -530,7 +543,7 @@ class BossCollector:
             source_job_id=generate_boss_job_id(url),
             title=str(raw.get("title") or "").strip(),
             company=str(raw.get("company") or "").strip(),
-            salary=str(raw.get("salary") or "").strip(),
+            salary=decode_iconfont_salary(str(raw.get("salary") or "").strip()),
             city=city,
             city_code=city_code,
             experience=str(raw.get("experience") or "").strip(),
@@ -546,7 +559,7 @@ class BossCollector:
             source_job_id=candidate.source_job_id,
             title=str(detail.get("title") or candidate.title).strip(),
             company=str(detail.get("company") or candidate.company).strip(),
-            salary=str(detail.get("salary") or candidate.salary).strip(),
+            salary=decode_iconfont_salary(str(detail.get("salary") or candidate.salary).strip()),
             city=candidate.city,
             city_code=candidate.city_code,
             experience=str(detail.get("experience") or candidate.experience).strip(),
