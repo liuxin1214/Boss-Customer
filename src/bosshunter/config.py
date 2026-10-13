@@ -175,6 +175,9 @@ DEFAULTS: dict[str, Any] = {
         "max_resume_sends_per_cycle": 5,
         "auto_reply_hr_questions": False,
         "check_all_chats": False,
+        "auto_reply_delay_seconds": 10,
+        "auto_reply_model": "",
+        "auto_reply_persona": "",
     },
     "follow_up": {
         "enabled": False,

@@ -20,13 +20,18 @@ import { getActionLabel, getStatusLabel } from '@/lib/status'
 import { cn } from '@/lib/utils'
 import {
   AlertTriangle,
+  Bot,
   BriefcaseBusiness,
+  ChevronDown,
+  ChevronUp,
   Download,
   ExternalLink,
   Eye,
   MessageCircle,
   Play,
   RefreshCw,
+  Save,
+  Settings2,
   ShieldCheck,
   Send,
   Square,
@@ -1605,25 +1610,49 @@ function MonitorExecutionView({
   onToggleMonitor?: () => void
   modePending?: WorkbenchMode | null
 }) {
+  const [notice, setNotice] = useState('')
   const [checkAllChats, setCheckAllChats] = useState(false)
   const [savingCheckAllChats, setSavingCheckAllChats] = useState(false)
 
+  const [autoReplyEnabled, setAutoReplyEnabled] = useState(false)
+  const [autoReplyDelay, setAutoReplyDelay] = useState(10)
+  const [autoReplyModel, setAutoReplyModel] = useState('')
+  const [autoReplyPersona, setAutoReplyPersona] = useState('')
+  const [defaultAiModel, setDefaultAiModel] = useState('')
+  const [savingAutoReply, setSavingAutoReply] = useState(false)
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+
   useEffect(() => {
     let cancelled = false
-    const fetchCheckAllChats = async () => {
+    const fetchConfigs = async () => {
       try {
-        const res = await fetch('/api/monitor/check-all-chats')
-        if (!res.ok) return
-        const data = await res.json()
-        if (!cancelled && typeof data.check_all_chats === 'boolean') {
-          setCheckAllChats(data.check_all_chats)
+        const [resAll, resAuto] = await Promise.all([
+          fetch('/api/monitor/check-all-chats'),
+          fetch('/api/monitor/auto-reply-config'),
+        ])
+        if (resAll.ok) {
+          const dataAll = await resAll.json()
+          if (!cancelled && typeof dataAll.check_all_chats === 'boolean') {
+            setCheckAllChats(dataAll.check_all_chats)
+          }
+        }
+        if (resAuto.ok) {
+          const dataAuto = await resAuto.json()
+          if (!cancelled) {
+            setAutoReplyEnabled(Boolean(dataAuto.auto_reply_hr_questions))
+            setAutoReplyDelay(Number(dataAuto.auto_reply_delay_seconds ?? 10))
+            setAutoReplyModel(String(dataAuto.auto_reply_model || ''))
+            setAutoReplyPersona(String(dataAuto.auto_reply_persona || ''))
+            setDefaultAiModel(String(dataAuto.default_ai_model || ''))
+          }
         }
       } catch {
         // ignore
       }
     }
-    void fetchCheckAllChats()
-    const handleConfigSaved = () => { void fetchCheckAllChats() }
+    void fetchConfigs()
+    const handleConfigSaved = () => { void fetchConfigs() }
     window.addEventListener('bosshunter-config-saved', handleConfigSaved)
     return () => {
       cancelled = true
@@ -1654,6 +1683,57 @@ function MonitorExecutionView({
       setNotice(err instanceof Error ? err.message : '开关切换失败')
     } finally {
       setSavingCheckAllChats(false)
+    }
+  }
+
+  const handleToggleAutoReply = async (checked: boolean) => {
+    setSavingAutoReply(true)
+    try {
+      const res = await fetch('/api/monitor/auto-reply-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_reply_hr_questions: checked }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || '切换自动聊天失败')
+      }
+      setAutoReplyEnabled(checked)
+      setNotice(
+        checked
+          ? `已开启「自动聊天」，收到 HR 消息将延迟 ${autoReplyDelay} 秒自动回复（防秒回）。`
+          : '已关闭「自动聊天」，AI 生成回复建议后需在此页面点击「确认回复」后发送。'
+      )
+      window.dispatchEvent(new Event('bosshunter-config-saved'))
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : '开关切换失败')
+    } finally {
+      setSavingAutoReply(false)
+    }
+  }
+
+  const handleSaveAutoReplySettings = async () => {
+    setSavingSettings(true)
+    try {
+      const res = await fetch('/api/monitor/auto-reply-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          auto_reply_delay_seconds: autoReplyDelay,
+          auto_reply_model: autoReplyModel,
+          auto_reply_persona: autoReplyPersona,
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || '保存设置失败')
+      }
+      setNotice('已成功保存自动聊天的人设、模型与延迟设置！')
+      window.dispatchEvent(new Event('bosshunter-config-saved'))
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : '保存设置失败')
+    } finally {
+      setSavingSettings(false)
     }
   }
 
@@ -1689,7 +1769,6 @@ function MonitorExecutionView({
     ? visibleHistory
     : visibleHistory.slice(0, 8)
   const [replyDrafts, setReplyDrafts] = useState<Record<number, string>>({})
-  const [notice, setNotice] = useState('')
   const [openingChatId, setOpeningChatId] = useState<number | null>(null)
   const [preparingReplyId, setPreparingReplyId] = useState<number | null>(null)
 
@@ -1861,6 +1940,123 @@ function MonitorExecutionView({
             onChange={handleToggleCheckAllChats}
           />
         </div>
+      </div>
+
+      {/* 自动聊天设置卡片 */}
+      <div className="mb-4 rounded-2xl border border-card-border bg-[#FFFCFA] p-4 transition-all hover:border-primary/40">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-foreground">自动聊天</span>
+                <span
+                  className={cn(
+                    'rounded-full px-2 py-0.5 text-xs font-semibold',
+                    autoReplyEnabled ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-muted'
+                  )}
+                >
+                  {autoReplyEnabled ? `已开启（延迟 ${autoReplyDelay} 秒防秒回）` : '已关闭（手动确认模式）'}
+                </span>
+              </div>
+              <p className="mt-1 text-xs leading-5 text-muted">
+                {autoReplyEnabled
+                  ? `开启状态：检测到 HR 发送消息或问题时，AI 将自动根据人设与岗位背景生成回复，延迟 ${autoReplyDelay} 秒后自动发送，无需手动确认。`
+                  : '关闭状态：检测到 HR 回复后生成 AI 建议，保留在下方待处理列表中，需手动点击「确认回复」后才发送。'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowSettings(prev => !prev)}
+              className="text-xs"
+            >
+              <Settings2 className="mr-1.5 h-3.5 w-3.5" />
+              {showSettings ? '收起人设/模型' : '设定人设与模型'}
+              {showSettings ? <ChevronUp className="ml-1 h-3.5 w-3.5" /> : <ChevronDown className="ml-1 h-3.5 w-3.5" />}
+            </Button>
+            <Switch
+              checked={autoReplyEnabled}
+              disabled={savingAutoReply}
+              onChange={handleToggleAutoReply}
+            />
+          </div>
+        </div>
+
+        {/* 展开的人设与模型设定 */}
+        {showSettings && (
+          <div className="mt-4 border-t border-card-border pt-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-bold text-foreground">
+                  AI 模型名称 (可选)
+                </label>
+                <p className="mt-0.5 text-[11px] text-muted">
+                  复用 AI 评审的 API Key 与 Base URL；留空则默认继承评审模型
+                </p>
+                <input
+                  type="text"
+                  value={autoReplyModel}
+                  onChange={e => setAutoReplyModel(e.target.value)}
+                  placeholder={defaultAiModel ? `默认使用: ${defaultAiModel}` : '例如: gpt-4o / deepseek-chat'}
+                  className="mt-1.5 flex h-9 w-full rounded-xl border border-card-border bg-white px-3 py-1 text-xs text-foreground placeholder:text-muted/60 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-foreground">
+                  防秒回延迟 (秒)
+                </label>
+                <p className="mt-0.5 text-[11px] text-muted">
+                  收到 HR 消息后的等待秒数，防止秒回被平台识别风控
+                </p>
+                <div className="mt-1.5 flex h-9 items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={120}
+                    value={autoReplyDelay}
+                    onChange={e => setAutoReplyDelay(Math.max(0, Number(e.target.value)))}
+                    className="flex h-9 w-24 rounded-xl border border-card-border bg-white px-3 py-1 text-center text-xs text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  />
+                  <span className="text-xs text-muted">秒（推荐 5~15 秒，默认 10 秒）</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3">
+              <label className="block text-xs font-bold text-foreground">
+                自定义人设 (设定沟通风格与求职优势)
+              </label>
+              <p className="mt-0.5 text-[11px] text-muted">
+                设定求职者人设、语气偏好、特长或补充说明，AI 回复将严格遵循此人设
+              </p>
+              <textarea
+                rows={3}
+                value={autoReplyPersona}
+                onChange={e => setAutoReplyPersona(e.target.value)}
+                placeholder="例如：资深全栈工程师，表达严谨礼貌、客观务实，精通Python后台架构与高并发。期望薪资在岗位区间内，近两周内可入职..."
+                className="mt-1.5 w-full rounded-xl border border-card-border bg-white p-3 text-xs leading-5 text-foreground placeholder:text-muted/60 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+              />
+            </div>
+
+            <div className="mt-3 flex items-center justify-end gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={savingSettings}
+                onClick={handleSaveAutoReplySettings}
+              >
+                <Save className="mr-1.5 h-3.5 w-3.5" />
+                {savingSettings ? '保存中…' : '保存人设与模型设置'}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
       <div className="mb-4 flex flex-wrap gap-2">
         {[

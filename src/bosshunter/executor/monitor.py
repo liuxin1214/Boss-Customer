@@ -847,8 +847,15 @@ def _generate_auto_reply(messages: list[dict], job: dict, config: dict) -> str |
     resume_path = Path(config.get("profile", {}).get("resume_path", "./resume.md"))
     resume_summary = resume_path.read_text(encoding="utf-8")[:800] if resume_path.exists() else "（未配置简历）"
 
-    prompt = f"""你是一位求职者，正在BOSS直聘上和HR沟通。请根据对话上下文生成一条自然、礼貌的回复。
+    monitor_cfg = config.get("monitor", {}) if isinstance(config, dict) else {}
+    persona = str(monitor_cfg.get("auto_reply_persona") or "").strip()
+    auto_reply_model = str(monitor_cfg.get("auto_reply_model") or "").strip()
 
+    persona_section = f"\n## 设定人设\n{persona}\n" if persona else ""
+    persona_rule = "，并严格符合上述设定人设" if persona else ""
+
+    prompt = f"""你是一位求职者，正在BOSS直聘上和HR沟通。请根据对话上下文生成一条自然、礼貌的回复。
+{persona_section}
 ## 对话记录
 {conv_text}
 
@@ -861,7 +868,7 @@ def _generate_auto_reply(messages: list[dict], job: dict, config: dict) -> str |
 
 ## 要求
 1. 根据HR最后一条消息的意图来回复，自然对话
-2. 语气像真人在手机上打字，不要太正式
+2. 语气像真人在手机上打字，不要太正式{persona_rule}
 3. 字数控制在30-100字
 4. 不要重复之前已经说过的内容
 5. 如果HR在约面试时间，积极配合
@@ -869,7 +876,14 @@ def _generate_auto_reply(messages: list[dict], job: dict, config: dict) -> str |
 
 请直接输出回复文本，不要加任何标记。"""
 
-    return _call_claude(prompt, config)
+    call_config = config
+    if auto_reply_model:
+        call_config = dict(config)
+        ai_cfg = dict(config.get("ai", {})) if isinstance(config.get("ai"), dict) else {}
+        ai_cfg["model"] = auto_reply_model
+        call_config["ai"] = ai_cfg
+
+    return _call_claude(prompt, call_config)
 
 
 def _send_message_in_chat(target_id: str, message: str) -> bool:
@@ -1768,7 +1782,19 @@ def _handle_conversation(job: dict, config: dict, conversation: dict | None = No
         close_tab(target_id)
         return "reply_pending"
 
-    # Send the reply
+    # Send the reply (anti-instant-reply delay)
+    delay_seconds = config.get("monitor", {}).get("auto_reply_delay_seconds", 10)
+    try:
+        delay_seconds = float(delay_seconds)
+    except (ValueError, TypeError):
+        delay_seconds = 10.0
+
+    if delay_seconds > 0:
+        console.print(f"[cyan]    防秒回：等待 {delay_seconds:g} 秒后自动发送回复...[/cyan]")
+        if _wait_or_stop(config, delay_seconds):
+            close_tab(target_id)
+            return "stopped"
+
     if stop_requested(config):
         close_tab(target_id)
         return "stopped"

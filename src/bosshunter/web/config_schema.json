@@ -119,7 +119,10 @@
         {"key": "max_consecutive_page_failures", "label": "连续页面失败停止阈值", "type": "number", "min": 1, "max": 10, "default": 3},
         {"key": "max_resume_sends_per_cycle", "label": "每轮最多发简历数", "type": "number", "min": 1, "max": 20, "default": 5},
         {"key": "auto_reply_hr_questions", "label": "检测到 HR 问题时自动回复", "type": "switch", "default": false, "description": "关闭时只生成回复建议，需要在监测执行中确认后发送"},
-        {"key": "check_all_chats", "label": "检测所有聊天", "type": "switch", "default": false, "description": "打开后将监测聊天列表中的所有对话，即使未在平台投递记录中"}
+        {"key": "check_all_chats", "label": "检测所有聊天", "type": "switch", "default": false, "description": "打开后将监测聊天列表中的所有对话，即使未在平台投递记录中"},
+        {"key": "auto_reply_delay_seconds", "label": "防秒回延迟 (秒)", "type": "number", "min": 0, "max": 120, "default": 10, "description": "自动回复前的等待秒数，防止秒回被平台风控或显得不自然"},
+        {"key": "auto_reply_model", "label": "自动聊天 AI 模型", "type": "text", "default": "", "description": "留空则使用 AI 评审配置的模型，复用相同的 API Key 与 Base URL"},
+        {"key": "auto_reply_persona", "label": "自定义人设", "type": "textarea", "default": "", "description": "设定自动回复时的人设性格、沟通语气、擅长技能等"}
       ]
     },
     {

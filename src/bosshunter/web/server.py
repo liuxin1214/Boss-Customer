@@ -523,8 +523,16 @@ def _execute_monitor(task: WorkbenchTask, config: dict, *, initial_cooldown: boo
 					return
 			latest_cfg = load_config(CONFIG_PATH)
 			monitor_config["monitor"] = latest_cfg.get("monitor", {})
+			monitor_config["ai"] = latest_cfg.get("ai", {})
 			is_all_chats = bool(monitor_config["monitor"].get("check_all_chats"))
-			_log(task, f"执行一轮监测{'（检测所有聊天）' if is_all_chats else ''}")
+			is_auto_reply = bool(monitor_config["monitor"].get("auto_reply_hr_questions"))
+			flags = []
+			if is_all_chats:
+				flags.append("检测所有聊天")
+			if is_auto_reply:
+				flags.append("自动聊天已开启")
+			suffix = f"（{'，'.join(flags)}）" if flags else ""
+			_log(task, f"执行一轮监测{suffix}")
 			summary = monitor_and_send_resumes(monitor_config)
 			if task.stop_requested.is_set():
 				return
@@ -1229,6 +1237,59 @@ def api_monitor_post_check_all_chats():
 		config.setdefault("monitor", {})["check_all_chats"] = check_all
 		_write_config(config)
 		return _json_response({"success": True, "check_all_chats": check_all})
+	except Exception as e:
+		return _json_response({"error": str(e)}, 500)
+
+
+@app.route("/api/monitor/auto-reply-config")
+def api_monitor_get_auto_reply_config():
+	try:
+		config = load_config(CONFIG_PATH)
+		monitor_cfg = config.get("monitor", {})
+		ai_cfg = config.get("ai", {})
+		return _json_response({
+			"auto_reply_hr_questions": bool(monitor_cfg.get("auto_reply_hr_questions", False)),
+			"auto_reply_delay_seconds": int(monitor_cfg.get("auto_reply_delay_seconds", 10)),
+			"auto_reply_model": str(monitor_cfg.get("auto_reply_model") or ""),
+			"auto_reply_persona": str(monitor_cfg.get("auto_reply_persona") or ""),
+			"default_ai_model": str(ai_cfg.get("model") or ""),
+			"ai_provider": str(ai_cfg.get("provider") or ""),
+		})
+	except Exception as e:
+		return _json_response({"error": str(e)}, 500)
+
+
+@app.route("/api/monitor/auto-reply-config", method="POST")
+def api_monitor_post_auto_reply_config():
+	try:
+		data = request.json or {}
+		config = load_config(CONFIG_PATH)
+		monitor_cfg = config.setdefault("monitor", {})
+
+		if "auto_reply_hr_questions" in data:
+			monitor_cfg["auto_reply_hr_questions"] = bool(data["auto_reply_hr_questions"])
+		if "auto_reply_delay_seconds" in data:
+			try:
+				monitor_cfg["auto_reply_delay_seconds"] = max(0, int(data["auto_reply_delay_seconds"]))
+			except (ValueError, TypeError):
+				monitor_cfg["auto_reply_delay_seconds"] = 10
+		if "auto_reply_model" in data:
+			monitor_cfg["auto_reply_model"] = str(data["auto_reply_model"] or "").strip()
+		if "auto_reply_persona" in data:
+			monitor_cfg["auto_reply_persona"] = str(data["auto_reply_persona"] or "").strip()
+
+		_write_config(config)
+
+		ai_cfg = config.get("ai", {})
+		return _json_response({
+			"success": True,
+			"auto_reply_hr_questions": bool(monitor_cfg.get("auto_reply_hr_questions", False)),
+			"auto_reply_delay_seconds": int(monitor_cfg.get("auto_reply_delay_seconds", 10)),
+			"auto_reply_model": str(monitor_cfg.get("auto_reply_model") or ""),
+			"auto_reply_persona": str(monitor_cfg.get("auto_reply_persona") or ""),
+			"default_ai_model": str(ai_cfg.get("model") or ""),
+			"ai_provider": str(ai_cfg.get("provider") or ""),
+		})
 	except Exception as e:
 		return _json_response({"error": str(e)}, 500)
 

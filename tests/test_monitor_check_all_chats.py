@@ -227,6 +227,217 @@ class MonitorCheckAllChatsTests(unittest.TestCase):
             get_res2 = server.api_monitor_get_check_all_chats()
             self.assertEqual(json.loads(get_res2)["check_all_chats"], True)
 
+    def test_generate_auto_reply_with_persona_and_model(self):
+        config = {
+            "ai": {
+                "provider": "openai_compatible",
+                "api_key": "test-key-123",
+                "base_url": "https://api.example.com",
+                "model": "base-model",
+            },
+            "monitor": {
+                "auto_reply_persona": "5年资深前端，擅长React与性能优化",
+                "auto_reply_model": "custom-chat-model",
+            },
+            "profile": {
+                "resume_path": "./non_existent_resume.md",
+            },
+        }
+        messages = [
+            {"sender": "hr", "text": "你好，请问做过性能优化吗？"},
+        ]
+        job = {"id": "job-1", "title": "前端开发", "company": "TechCo"}
+
+        captured_prompt = []
+        captured_config = []
+
+        def mock_call(prompt, cfg):
+            captured_prompt.append(prompt)
+            captured_config.append(cfg)
+            return "是的，我做过很多前端性能优化项目。"
+
+        with patch.object(monitor, "_call_claude", side_effect=mock_call):
+            reply = monitor._generate_auto_reply(messages, job, config)
+            self.assertEqual(reply, "是的，我做过很多前端性能优化项目。")
+            self.assertEqual(len(captured_prompt), 1)
+            # Verify persona is injected into prompt
+            self.assertIn("## 设定人设\n5年资深前端，擅长React与性能优化", captured_prompt[0])
+            self.assertIn("严格符合上述设定人设", captured_prompt[0])
+            # Verify custom model is passed while keeping api_key and base_url
+            self.assertEqual(captured_config[0]["ai"]["model"], "custom-chat-model")
+            self.assertEqual(captured_config[0]["ai"]["api_key"], "test-key-123")
+            self.assertEqual(captured_config[0]["ai"]["base_url"], "https://api.example.com")
+
+    def test_handle_conversation_auto_reply_disabled_records_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "data" / "bosshunter.db"
+            db = get_db(db_path)
+            try:
+                insert_job(db, _job("job-10", status="sent"))
+            finally:
+                db.close()
+
+            config = {
+                "monitor": {
+                    "auto_reply_hr_questions": False,
+                },
+            }
+            messages = [{"sender": "hr", "text": "方便发个简历吗？"}]
+            job = _job("job-10")
+
+            with patch.object(monitor, "get_db", side_effect=lambda: get_db(db_path)), \
+                 patch.object(monitor, "_open_scanned_conversation", return_value="tab-1"), \
+                 patch.object(monitor, "_wait_or_stop", return_value=False), \
+                 patch.object(monitor, "evaluate", return_value=json.dumps(messages)), \
+                 patch.object(monitor, "_detect_rejection", return_value=False), \
+                 patch.object(monitor, "_detect_resume_request", return_value=False), \
+                 patch.object(monitor, "_generate_auto_reply", return_value="可以的，稍等。"), \
+                 patch.object(monitor, "_send_message_in_chat") as mock_send, \
+                 patch.object(monitor, "close_tab"):
+                result = monitor._handle_conversation(job, config)
+                self.assertEqual(result, "reply_pending")
+                mock_send.assert_not_called()
+
+                # Verify history in DB
+                check_db = get_db(db_path)
+                try:
+                    row = check_db.execute("SELECT * FROM history WHERE job_id = 'job-10'").fetchone()
+                    self.assertIsNotNone(row)
+                    self.assertEqual(row["action"], "reply_pending")
+                finally:
+                    check_db.close()
+
+    def test_handle_conversation_auto_reply_enabled_with_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "data" / "bosshunter.db"
+            db = get_db(db_path)
+            try:
+                insert_job(db, _job("job-11", status="sent"))
+            finally:
+                db.close()
+
+            config = {
+                "monitor": {
+                    "auto_reply_hr_questions": True,
+                    "auto_reply_delay_seconds": 10,
+                },
+            }
+            messages = [{"sender": "hr", "text": "何时能来面试？"}]
+            job = _job("job-11")
+
+            waited_seconds = []
+            def mock_wait(cfg, seconds):
+                waited_seconds.append(seconds)
+                return False  # not stopped
+
+            with patch.object(monitor, "get_db", side_effect=lambda: get_db(db_path)), \
+                 patch.object(monitor, "_open_scanned_conversation", return_value="tab-1"), \
+                 patch.object(monitor, "evaluate", return_value=json.dumps(messages)), \
+                 patch.object(monitor, "_detect_rejection", return_value=False), \
+                 patch.object(monitor, "_detect_resume_request", return_value=False), \
+                 patch.object(monitor, "_generate_auto_reply", return_value="周三下午随时可以。"), \
+                 patch.object(monitor, "_wait_or_stop", side_effect=mock_wait), \
+                 patch.object(monitor, "_send_message_in_chat", return_value=True) as mock_send, \
+                 patch.object(monitor, "close_tab"):
+                result = monitor._handle_conversation(job, config)
+                self.assertEqual(result, "auto_replied")
+                # Verify delay was called with 10 seconds (in addition to 2s page wait)
+                self.assertIn(10.0, waited_seconds)
+                mock_send.assert_called_once_with("tab-1", "周三下午随时可以。")
+
+                # Verify history in DB
+                check_db = get_db(db_path)
+                try:
+                    row = check_db.execute("SELECT * FROM history WHERE job_id = 'job-11'").fetchone()
+                    self.assertIsNotNone(row)
+                    self.assertEqual(row["action"], "auto_replied")
+                finally:
+                    check_db.close()
+
+    def test_handle_conversation_auto_reply_stopped_during_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "data" / "bosshunter.db"
+            db = get_db(db_path)
+            try:
+                insert_job(db, _job("job-12", status="sent"))
+            finally:
+                db.close()
+
+            config = {
+                "monitor": {
+                    "auto_reply_hr_questions": True,
+                    "auto_reply_delay_seconds": 10,
+                },
+            }
+            messages = [{"sender": "hr", "text": "您好"}]
+            job = _job("job-12")
+
+            def mock_wait(cfg, seconds):
+                return seconds == 10.0
+
+            with patch.object(monitor, "get_db", side_effect=lambda: get_db(db_path)), \
+                 patch.object(monitor, "_open_scanned_conversation", return_value="tab-1"), \
+                 patch.object(monitor, "evaluate", return_value=json.dumps(messages)), \
+                 patch.object(monitor, "_detect_rejection", return_value=False), \
+                 patch.object(monitor, "_detect_resume_request", return_value=False), \
+                 patch.object(monitor, "_generate_auto_reply", return_value="您好！"), \
+                 patch.object(monitor, "_wait_or_stop", side_effect=mock_wait), \
+                 patch.object(monitor, "_send_message_in_chat") as mock_send, \
+                 patch.object(monitor, "close_tab"):
+                result = monitor._handle_conversation(job, config)
+                self.assertEqual(result, "stopped")
+                mock_send.assert_not_called()
+
+    def test_api_monitor_auto_reply_config(self):
+        from bosshunter.web import server
+
+        test_cfg = {
+            "ai": {"model": "gpt-4o", "provider": "openai_compatible"},
+            "monitor": {
+                "auto_reply_hr_questions": False,
+                "auto_reply_delay_seconds": 10,
+                "auto_reply_model": "",
+                "auto_reply_persona": "",
+            },
+        }
+
+        def mock_load(path=None):
+            return dict(test_cfg)
+
+        def mock_write(cfg):
+            test_cfg.update(cfg)
+
+        with patch.object(server, "load_config", side_effect=mock_load), \
+             patch.object(server, "_write_config", side_effect=mock_write):
+            # Test GET
+            get_res = json.loads(server.api_monitor_get_auto_reply_config())
+            self.assertEqual(get_res["auto_reply_hr_questions"], False)
+            self.assertEqual(get_res["auto_reply_delay_seconds"], 10)
+            self.assertEqual(get_res["default_ai_model"], "gpt-4o")
+
+            # Test POST
+            with patch.object(server, "request") as mock_req:
+                mock_req.json = {
+                    "auto_reply_hr_questions": True,
+                    "auto_reply_delay_seconds": 15,
+                    "auto_reply_model": "deepseek-coder",
+                    "auto_reply_persona": "资深后端工程师",
+                }
+                post_res = json.loads(server.api_monitor_post_auto_reply_config())
+                self.assertEqual(post_res["success"], True)
+                self.assertEqual(post_res["auto_reply_hr_questions"], True)
+                self.assertEqual(post_res["auto_reply_delay_seconds"], 15)
+                self.assertEqual(post_res["auto_reply_model"], "deepseek-coder")
+                self.assertEqual(post_res["auto_reply_persona"], "资深后端工程师")
+
+            # Test GET after POST
+            get_res2 = json.loads(server.api_monitor_get_auto_reply_config())
+            self.assertEqual(get_res2["auto_reply_hr_questions"], True)
+            self.assertEqual(get_res2["auto_reply_delay_seconds"], 15)
+            self.assertEqual(get_res2["auto_reply_model"], "deepseek-coder")
+            self.assertEqual(get_res2["auto_reply_persona"], "资深后端工程师")
+
 
 if __name__ == "__main__":
     unittest.main()
+

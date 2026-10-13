@@ -750,11 +750,33 @@ export default function ConfigPage() {
             </Field>
             <div className="flex items-center justify-between rounded-2xl border border-card-border bg-[#FFFCFA] p-4">
               <div>
+                <label className="text-sm font-black text-foreground">检测所有聊天</label>
+                <p className="mt-1 text-xs text-muted">打开后将监测聊天列表中的所有对话，即使未在平台投递记录中。</p>
+              </div>
+              <Switch checked={config.monitor?.check_all_chats ?? false} onChange={v => updateConfig('monitor.check_all_chats', v)} />
+            </div>
+            <div className="flex items-center justify-between rounded-2xl border border-card-border bg-[#FFFCFA] p-4">
+              <div>
                 <label className="text-sm font-black text-foreground">检测到 HR 问题时自动回复</label>
-                <p className="mt-1 text-xs text-muted">默认关闭。关闭时只生成回复建议，需要你在“监测执行”中确认后发送。</p>
+                <p className="mt-1 text-xs text-muted">默认关闭。关闭时只生成回复建议，需要你在“监测执行”中确认后发送；开启后将延迟指定秒数自动回复。</p>
               </div>
               <Switch checked={config.monitor?.auto_reply_hr_questions ?? false} onChange={v => updateConfig('monitor.auto_reply_hr_questions', v)} />
             </div>
+            <Field label="防秒回延迟 (秒)" hint="自动回复前的等待秒数，防止秒回被平台风控或显得不自然">
+              <Input type="number" value={config.monitor?.auto_reply_delay_seconds ?? 10} onChange={e => updateConfig('monitor.auto_reply_delay_seconds', Number(e.target.value))} min={0} max={120} />
+            </Field>
+            <Field label="自动聊天 AI 模型 (可选)" hint="留空则复用 AI 评审配置的主模型，使用相同的 API Key 与 Base URL">
+              <Input value={config.monitor?.auto_reply_model || ''} onChange={e => updateConfig('monitor.auto_reply_model', e.target.value)} placeholder={`留空则使用主模型 (${config.ai?.model || '默认'})`} />
+            </Field>
+            <Field label="自定义人设 (设定回复风格)" hint="设定自动回复时的人设性格、沟通语气、擅长技能等">
+              <textarea
+                value={config.monitor?.auto_reply_persona || ''}
+                onChange={e => updateConfig('monitor.auto_reply_persona', e.target.value)}
+                placeholder="例如：资深全栈工程师，性格谦逊务实，精通Python与React，随时可面试。"
+                rows={3}
+                className="w-full rounded-md border border-card-border bg-white px-3 py-2 text-sm text-foreground placeholder:text-muted/60 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
+              />
+            </Field>
           </div>
         </SectionCard>
 
