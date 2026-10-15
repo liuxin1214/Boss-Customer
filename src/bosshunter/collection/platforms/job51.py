@@ -37,6 +37,8 @@ from bosshunter.browser import close_tab, evaluate, get_page_targets, new_tab
 from bosshunter.collection.base import CollectionBlockedError, CollectorHooks
 from bosshunter.collection.models import JobCandidate, PlatformCollectionRequest, PlatformCollectionResult
 from bosshunter.db import (
+    clear_collected_combos,
+    clear_page_progress,
     delete_page_progress,
     get_collected_combos,
     get_page_progress,
@@ -691,12 +693,17 @@ class Job51Collector:
         # 孤儿断点（关键词被增删后残留）顺带清理，避免脏数据累积。
         collected_combos: set[tuple[str, str]] = set()
         if self.safety_conn is not None:
-            all_keywords = set(request.keywords)
-            prune_collected_combos(self.safety_conn, "51job", all_keywords)
-            prune_page_progress(self.safety_conn, "51job", all_keywords)
-            collected_combos = get_collected_combos(
-                self.safety_conn, "51job", within_hours=self._resume_ttl_hours()
-            )
+            if getattr(request, "reset_progress", False):
+                clear_collected_combos(self.safety_conn, "51job")
+                clear_page_progress(self.safety_conn, "51job")
+                collected_combos = set()
+            else:
+                all_keywords = set(request.keywords)
+                prune_collected_combos(self.safety_conn, "51job", all_keywords)
+                prune_page_progress(self.safety_conn, "51job", all_keywords)
+                collected_combos = get_collected_combos(
+                    self.safety_conn, "51job", within_hours=self._resume_ttl_hours()
+                )
 
         # 反检测前置：时间窗口 + 随机休息日（复用 BossHunter throttle 配置）
         throttle_cfg = self.config.get("throttle", {}) if isinstance(self.config.get("throttle"), dict) else {}

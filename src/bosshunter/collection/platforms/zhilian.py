@@ -32,6 +32,8 @@ from bosshunter.browser import (
 from bosshunter.collection.base import CollectionBlockedError, CollectionError, CollectorHooks
 from bosshunter.collection.models import JobCandidate, PlatformCollectionRequest, PlatformCollectionResult
 from bosshunter.db import (
+    clear_collected_combos,
+    clear_page_progress,
     delete_page_progress,
     get_collected_combos,
     get_page_progress,
@@ -1254,12 +1256,17 @@ class ZhilianCollector:
         # 词级断点续采：跳过最近 N 小时内已完成的 (city, keyword) 组合。
         collected_combos: set[tuple[str, str]] = set()
         if self.safety_conn is not None:
-            all_keywords = set(request.keywords)
-            prune_collected_combos(self.safety_conn, "zhilian", all_keywords)
-            prune_page_progress(self.safety_conn, "zhilian", all_keywords)
-            collected_combos = get_collected_combos(
-                self.safety_conn, "zhilian", within_hours=self._resume_ttl_hours()
-            )
+            if getattr(request, "reset_progress", False):
+                clear_collected_combos(self.safety_conn, "zhilian")
+                clear_page_progress(self.safety_conn, "zhilian")
+                collected_combos = set()
+            else:
+                all_keywords = set(request.keywords)
+                prune_collected_combos(self.safety_conn, "zhilian", all_keywords)
+                prune_page_progress(self.safety_conn, "zhilian", all_keywords)
+                collected_combos = get_collected_combos(
+                    self.safety_conn, "zhilian", within_hours=self._resume_ttl_hours()
+                )
 
         # API-fetch 优先：尝试 API 模式，不可用时降级到 DOM 模式
         if self._api_fetch_enabled():

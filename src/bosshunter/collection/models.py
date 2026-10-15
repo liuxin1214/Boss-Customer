@@ -35,6 +35,7 @@ class PlatformCollectionRequest:
     max_pages: int = 3
     sort: str = "default"
     filters: dict[str, Any] = field(default_factory=dict)
+    reset_progress: bool = False
 
 
 @dataclass

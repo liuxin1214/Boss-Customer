@@ -18,6 +18,8 @@ from bosshunter.collection.models import JobCandidate, PlatformCollectionRequest
 from bosshunter.config import CITY_CODES
 from bosshunter.db import (
     add_risk_event,
+    clear_collected_combos,
+    clear_page_progress,
     delete_page_progress,
     get_collected_combos,
     get_page_progress,
@@ -395,12 +397,17 @@ class BossCollector:
         # 词级断点续采：跳过最近 N 小时内已完成的 (city, keyword) 组合。
         collected_combos: set[tuple[str, str]] = set()
         if self.safety_conn is not None:
-            all_keywords = set(request.keywords)
-            prune_collected_combos(self.safety_conn, "boss", all_keywords)
-            prune_page_progress(self.safety_conn, "boss", all_keywords)
-            collected_combos = get_collected_combos(
-                self.safety_conn, "boss", within_hours=self._resume_ttl_hours()
-            )
+            if getattr(request, "reset_progress", False):
+                clear_collected_combos(self.safety_conn, "boss")
+                clear_page_progress(self.safety_conn, "boss")
+                collected_combos = set()
+            else:
+                all_keywords = set(request.keywords)
+                prune_collected_combos(self.safety_conn, "boss", all_keywords)
+                prune_page_progress(self.safety_conn, "boss", all_keywords)
+                collected_combos = get_collected_combos(
+                    self.safety_conn, "boss", within_hours=self._resume_ttl_hours()
+                )
 
         if guard is not None:
             try:

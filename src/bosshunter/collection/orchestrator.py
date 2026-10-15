@@ -21,7 +21,14 @@ from bosshunter.collection.platforms.liepin import LiepinCollector, get_liepin_c
 from bosshunter.collection.platforms.zhilian import ZhilianCollector, get_zhilian_city_code
 from bosshunter.collection.registry import CollectorRegistry
 from bosshunter.collection_run_store import create_collection_run, update_collection_run
-from bosshunter.db import get_db, insert_job_if_new, job_identity_exists
+from bosshunter.db import (
+    clear_collected_combos,
+    clear_page_progress,
+    get_collected_combos,
+    get_db,
+    insert_job_if_new,
+    job_identity_exists,
+)
 from bosshunter.job_filters import matching_blocked_company, matching_deal_breaker
 
 
@@ -95,6 +102,7 @@ def normalize_collection_options(config: dict[str, Any], raw_options: dict[str, 
             "max_pages": base.get("max_pages", 3 if platform == "boss" else 1),
             "sort": str(base.get("sort") or ("newest" if platform == "boss" else "default")),
             "filters": normalize_boss_search_filters(base.get("filters")) if platform == "boss" else {},
+            "reset_progress": bool(base.get("reset_progress", supplied.get("reset_progress", False))),
         }
 
     order = supplied.get("platform_order")
@@ -117,6 +125,7 @@ def normalize_collection_options(config: dict[str, Any], raw_options: dict[str, 
     options = {
         "platform_order": order,
         "auto_score": supplied.get("auto_score", False) is True,
+        "reset_progress": supplied.get("reset_progress", False) is True,
         "platforms": {platform: platforms[platform] for platform in order if platform in platforms},
     }
     return validate_collection_options(options)
@@ -138,7 +147,13 @@ def validate_collection_options(options: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("平台顺序与平台配置不一致")
     if not isinstance(options.get("auto_score", False), bool):
         raise ValueError("auto_score 必须是布尔值")
-    normalized: dict[str, Any] = {"platform_order": order, "auto_score": bool(options.get("auto_score")), "platforms": {}}
+    global_reset = bool(options.get("reset_progress", False)) if isinstance(options, dict) else False
+    normalized: dict[str, Any] = {
+        "platform_order": order,
+        "auto_score": bool(options.get("auto_score")),
+        "reset_progress": global_reset,
+        "platforms": {},
+    }
     for platform in order:
         value = platforms.get(platform)
         if not isinstance(value, dict):
@@ -193,6 +208,7 @@ def validate_collection_options(options: dict[str, Any]) -> dict[str, Any]:
         sort = str(value.get("sort") or "default").strip()
         if sort not in SORT_OPTIONS[platform]:
             raise ValueError(f"{platform} 排序方式无效")
+        reset_progress = bool(value.get("reset_progress", global_reset))
         normalized["platforms"][platform] = {
             "keywords": keywords,
             "cities": cities,
@@ -200,6 +216,7 @@ def validate_collection_options(options: dict[str, Any]) -> dict[str, Any]:
             "max_pages": max_pages,
             "sort": sort,
             "filters": normalize_boss_search_filters(value.get("filters")) if platform == "boss" else {},
+            "reset_progress": reset_progress,
         }
     return normalized
 
@@ -331,6 +348,38 @@ class CollectionOrchestrator:
                     break
                 raw = options["platforms"][platform]
                 request = PlatformCollectionRequest(platform=platform, **raw)
+                if conn is not None:
+                    requested_combos = {
+                        (city, keyword)
+                        for city in request.cities
+                        for keyword in request.keywords
+                    }
+                    search_cfg = self.config.get("platforms", {}).get(platform, {}).get("search", {})
+                    if not search_cfg and isinstance(self.config.get("search"), dict):
+                        search_cfg = self.config.get("search", {})
+                    ttl_hours = search_cfg.get("resume_ttl_hours", 24)
+                    try:
+                        ttl_hours = max(1, min(int(ttl_hours or 24), 720))
+                    except (TypeError, ValueError):
+                        ttl_hours = 24
+
+                    already_collected = get_collected_combos(conn, platform, within_hours=ttl_hours)
+                    should_reset = getattr(request, "reset_progress", False) or bool(
+                        requested_combos and requested_combos.issubset(already_collected)
+                    )
+                    if should_reset:
+                        clear_collected_combos(conn, platform)
+                        clear_page_progress(conn, platform)
+                        request = PlatformCollectionRequest(
+                            platform=request.platform,
+                            keywords=request.keywords,
+                            cities=request.cities,
+                            city_codes=request.city_codes,
+                            max_pages=request.max_pages,
+                            sort=request.sort,
+                            filters=request.filters,
+                            reset_progress=True,
+                        )
                 states[platform]["status"] = "running"
                 self._persist(states, all_new_ids, platform)
                 processor = _SharedProcessor(

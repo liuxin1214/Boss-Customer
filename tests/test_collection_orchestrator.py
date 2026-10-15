@@ -12,7 +12,7 @@ from bosshunter.collection.orchestrator import (
     validate_collection_options,
 )
 from bosshunter.collection.registry import CollectorRegistry
-from bosshunter.db import get_db, insert_job
+from bosshunter.db import get_collected_combos, get_db, insert_job, mark_combo_collected
 
 
 def _candidate(platform: str, source_id: str, title: str = "正常岗位") -> JobCandidate:
@@ -48,8 +48,10 @@ class _FakeCollector:
         self.events = events
         self.candidates = candidates
         self.stop = stop
+        self.last_request = None
 
-    def collect(self, _request, hooks: CollectorHooks):
+    def collect(self, request, hooks: CollectorHooks):
+        self.last_request = request
         self.events.append(f"start:{self.platform}")
         for candidate in self.candidates:
             if hooks.stop_event and hooks.stop_event.is_set():
@@ -524,3 +526,57 @@ class OrchestrationFlowTests(TestCase):
                 )
         self.assertEqual(result["status"], "completed_with_errors")
         self.assertEqual(result["collected_job_ids"], ["new-1"])
+
+    def test_auto_resets_progress_when_all_combos_previously_completed(self):
+        fake = _FakeCollector("boss", [], [_candidate("boss", "new-1")])
+        registry = CollectorRegistry({"boss": lambda: fake})
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            conn = get_db(db_path)
+            mark_combo_collected(conn, "boss", "北京", "AI")
+            conn.close()
+
+            # The options request has ("北京", "AI"), which matches all collected combos
+            result = CollectionOrchestrator({}, db_path=db_path, registry=registry).run(_options())
+            self.assertEqual(result["status"], "completed")
+            self.assertIsNotNone(fake.last_request)
+            self.assertTrue(fake.last_request.reset_progress)
+
+    def test_preserves_breakpoint_when_partial_combos_completed(self):
+        fake = _FakeCollector("boss", [], [_candidate("boss", "new-1")])
+        registry = CollectorRegistry({"boss": lambda: fake})
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            conn = get_db(db_path)
+            mark_combo_collected(conn, "boss", "北京", "AI")
+            conn.close()
+
+            # Options have 2 keywords: "AI" and "Python"
+            opts = _options()
+            opts["platforms"]["boss"]["keywords"] = ["AI", "Python"]
+            result = CollectionOrchestrator({}, db_path=db_path, registry=registry).run(opts)
+            self.assertEqual(result["status"], "completed")
+            self.assertIsNotNone(fake.last_request)
+            # Breakpoint is preserved: not all requested keywords were finished
+            self.assertFalse(fake.last_request.reset_progress)
+            conn = get_db(db_path)
+            combos = get_collected_combos(conn, "boss", within_hours=24)
+            conn.close()
+            self.assertIn(("北京", "AI"), combos)
+
+    def test_explicit_reset_progress_resets_progress(self):
+        fake = _FakeCollector("boss", [], [_candidate("boss", "new-1")])
+        registry = CollectorRegistry({"boss": lambda: fake})
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            conn = get_db(db_path)
+            mark_combo_collected(conn, "boss", "北京", "AI")
+            conn.close()
+
+            opts = _options()
+            opts["reset_progress"] = True
+            opts["platforms"]["boss"]["keywords"] = ["AI", "Python"]
+            result = CollectionOrchestrator({}, db_path=db_path, registry=registry).run(opts)
+            self.assertEqual(result["status"], "completed")
+            self.assertIsNotNone(fake.last_request)
+            self.assertTrue(fake.last_request.reset_progress)

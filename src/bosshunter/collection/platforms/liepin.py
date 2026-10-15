@@ -36,6 +36,8 @@ from bosshunter.browser import close_tab, evaluate, navigate as browser_navigate
 from bosshunter.collection.base import CollectionError, CollectorHooks
 from bosshunter.collection.models import JobCandidate, PlatformCollectionRequest, PlatformCollectionResult
 from bosshunter.db import (
+    clear_collected_combos,
+    clear_page_progress,
     delete_page_progress,
     get_collected_combos,
     get_page_progress,
@@ -319,12 +321,17 @@ class LiepinCollector:
         # 词级断点续采：跳过最近 N 小时内已完成的 (city, keyword) 组合。
         collected_combos: set[tuple[str, str]] = set()
         if self.safety_conn is not None:
-            all_keywords = set(request.keywords)
-            prune_collected_combos(self.safety_conn, "liepin", all_keywords)
-            prune_page_progress(self.safety_conn, "liepin", all_keywords)
-            collected_combos = get_collected_combos(
-                self.safety_conn, "liepin", within_hours=self._resume_ttl_hours()
-            )
+            if getattr(request, "reset_progress", False):
+                clear_collected_combos(self.safety_conn, "liepin")
+                clear_page_progress(self.safety_conn, "liepin")
+                collected_combos = set()
+            else:
+                all_keywords = set(request.keywords)
+                prune_collected_combos(self.safety_conn, "liepin", all_keywords)
+                prune_page_progress(self.safety_conn, "liepin", all_keywords)
+                collected_combos = get_collected_combos(
+                    self.safety_conn, "liepin", within_hours=self._resume_ttl_hours()
+                )
 
         throttle_cfg = self.config.get("throttle", {}) if isinstance(self.config.get("throttle"), dict) else {}
         send_windows = throttle_cfg.get("send_windows", ["09:00-16:00"])

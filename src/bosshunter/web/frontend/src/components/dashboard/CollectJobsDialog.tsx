@@ -92,6 +92,7 @@ export function CollectJobsDialog({ open, mode = 'collect', activeTask, onClose,
   const [drafts, setDrafts] = useState(initialDrafts)
   const [order, setOrder] = useState<PlatformId[]>(['boss'])
   const [autoScore, setAutoScore] = useState(false)
+  const [resetProgress, setResetProgress] = useState(false)
   const [error, setError] = useState('')
   const [zhilianCities, setZhilianCities] = useState<PlatformCityOption[]>([])
   const [job51Cities, setJob51Cities] = useState<PlatformCityOption[]>([])
@@ -206,9 +207,15 @@ export function CollectJobsDialog({ open, mode = 'collect', activeTask, onClose,
         city_codes: cityCodes,
         max_pages: Number(draft.maxPages),
         sort: draft.sort,
+        reset_progress: resetProgress,
       }
     }
-    onStart({ platform_order: enabledOrder, auto_score: mode === 'full' ? true : autoScore, platforms })
+    onStart({
+      platform_order: enabledOrder,
+      auto_score: mode === 'full' ? true : autoScore,
+      reset_progress: resetProgress,
+      platforms,
+    })
   }
 
   return (
@@ -281,6 +288,7 @@ export function CollectJobsDialog({ open, mode = 'collect', activeTask, onClose,
         </div>
 
         <label className="mt-4 flex items-center justify-between rounded-2xl border border-card-border bg-white p-4"><div><div className="text-sm font-black">{mode === 'full' ? '全流程自动评分' : '采集后自动评分'}</div><p className="mt-1 text-xs leading-5 text-muted">{mode === 'full' ? '全流程必须先评分；评分后进入人工确认，再按平台适配器执行招呼和监测。' : '默认关闭；开启后只评分本轮新增岗位，评分结束即停止，不发送消息、不投递、不监测。'}</p></div><Switch checked={mode === 'full' || autoScore} onChange={mode === 'full' ? () => undefined : setAutoScore} disabled={mode === 'full'} /></label>
+        <label className="mt-3 flex items-center justify-between rounded-2xl border border-card-border bg-white p-4"><div><div className="text-sm font-black">重置断点（从头完整采集）</div><p className="mt-1 text-xs leading-5 text-muted">默认关闭，自动断点续采；若开启，将清空上次采集已完成词和页码，从第一个词的第一页重新完整采集。</p></div><Switch checked={resetProgress} onChange={setResetProgress} /></label>
         {error && <div className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-danger">{error}</div>}
         <div className="mt-5 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>取消</Button><Button onClick={start} disabled={Boolean(activeTask)}>{mode === 'full' ? '开始全流程' : '开始采集'}</Button></div>
       </div>

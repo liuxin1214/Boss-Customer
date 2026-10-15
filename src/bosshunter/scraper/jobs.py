@@ -18,7 +18,14 @@ from bosshunter.collection.base import CollectorHooks
 from bosshunter.collection.models import JobCandidate, PlatformCollectionRequest
 from bosshunter.collection.platforms.boss import BossBrowser, BossCollector, generate_boss_job_id
 from bosshunter.config import CITY_CODES
-from bosshunter.db import get_db, insert_job, job_exists
+from bosshunter.db import (
+    clear_collected_combos,
+    clear_page_progress,
+    get_collected_combos,
+    get_db,
+    insert_job,
+    job_exists,
+)
 from bosshunter.job_filters import matching_blocked_company, matching_deal_breaker
 from bosshunter.platform_safety import PlatformSafetyStop
 from bosshunter.throttle import PageThrottle
@@ -59,6 +66,7 @@ def _legacy_request(config: dict, keywords: list[str]) -> PlatformCollectionRequ
         max_pages=min(_positive_int(search_config.get("max_pages", 3), 3), 10),
         sort=str(search_config.get("sort") or "default"),
         filters=search_config.get("filters") if isinstance(search_config.get("filters"), dict) else {},
+        reset_progress=bool(config.get("reset_progress", False)),
     )
 
 
@@ -84,6 +92,21 @@ def _scrape_jobs_impl(
         return 0
 
     request = _legacy_request(config, keywords)
+    requested_combos = {(city, kw) for city in request.cities for kw in request.keywords}
+    already_collected = get_collected_combos(db, "boss", within_hours=24)
+    if config.get("reset_progress") or (requested_combos and requested_combos.issubset(already_collected)):
+        clear_collected_combos(db, "boss")
+        clear_page_progress(db, "boss")
+        request = PlatformCollectionRequest(
+            platform=request.platform,
+            keywords=request.keywords,
+            cities=request.cities,
+            city_codes=request.city_codes,
+            max_pages=request.max_pages,
+            sort=request.sort,
+            filters=request.filters,
+            reset_progress=True,
+        )
     counts = {
         "seen": 0, "new": 0, "duplicate": 0, "filtered": 0,
         "parse_failed": 0, "save_failed": 0, "search_pages": 0,
