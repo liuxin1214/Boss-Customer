@@ -328,6 +328,9 @@ const server = http.createServer(async (req, res) => {
         } catch {}
       }
       sendJson(res, { targetId });
+    } else if (pathname === '/activate') {
+      const resp = await sendCDP('Target.activateTarget', { targetId: q.target });
+      sendJson(res, resp.result || { ok: true });
     } else if (pathname === '/close') {
       const resp = await sendCDP('Target.closeTarget', { targetId: q.target });
       sessions.delete(q.target);

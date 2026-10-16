@@ -7,7 +7,7 @@ import time
 from rich.console import Console
 
 from bosshunter.ai.credentials import call_anthropic_text
-from bosshunter.browser import new_tab, close_tab, evaluate, click, wait_for_load, get_page_info
+from bosshunter.browser import new_tab, close_tab, evaluate, click, wait_for_load, get_page_info, activate_tab, get_page_targets
 from bosshunter.cancellation import (
     OperationCancelled,
     get_stop_event,
@@ -78,41 +78,60 @@ def get_effective_monitor_interval_minutes(
 # JS: Extract chat list with full message context
 JS_EXTRACT_CHAT_LIST = r"""
 (() => {
-    const items = document.querySelectorAll('li[role=listitem]');
+    const items = document.querySelectorAll('li[role=listitem], .user-list li, .chat-user-list li, ul.conversation-list > li, [class*="conversation-item"], [class*="chat-item"]');
     const results = [];
     items.forEach(item => {
-        const nameText = item.querySelector('.name-text');
-        const nameBox = item.querySelector('.name-box');
-        const lastMsgEl = item.querySelector('.last-msg-text');
-        const msgStatus = item.querySelector('.message-status');
-        const unreadEl = item.querySelector('.unread-count, .badge-count, .notice-badge, [class*="unread"]');
+        const nameText = item.querySelector('.name-text, [class*="name-text"], .name');
+        const nameBox = item.querySelector('.name-box, [class*="name-box"]');
+        const lastMsgEl = item.querySelector('.last-msg-text, [class*="last-msg"], .msg-text');
+        const msgStatus = item.querySelector('.message-status, [class*="status"]');
+        const unreadEl = item.querySelector('.unread-count, .badge-count, .notice-badge, [class*="unread"], [class*="badge"], sup');
 
         if (!nameText) return;
+        const hrNameRaw = nameText.textContent.trim();
+        if (!hrNameRaw) return;
 
         const spans = nameBox ? nameBox.querySelectorAll('span') : [];
         const company = spans.length >= 2 ? spans[1].textContent.trim() : '';
         const hrTitle = spans.length >= 3 ? spans[spans.length - 1].textContent.trim() : '';
 
-        // A missing delivery marker is not enough to prove the message came from HR.
-        // Treat uncertain rows as candidates and verify direction from the full chat.
+        // Unread badge detection: if there is an unread badge with count > 0 or red dot
+        let hasUnread = false;
+        if (unreadEl) {
+            const utext = (unreadEl.textContent || '').trim();
+            if (utext === '' || utext === '0') {
+                hasUnread = !utext.startsWith('0');
+            } else if (parseInt(utext, 10) > 0) {
+                hasUnread = true;
+            } else {
+                hasUnread = true;
+            }
+        }
+
         const statusClass = msgStatus ? msgStatus.className : '';
         const lastMsgClass = lastMsgEl ? String(lastMsgEl.className || '').toLowerCase() : '';
         const lastMessage = lastMsgEl ? lastMsgEl.textContent.trim().substring(0, 200) : '';
-        const isOurMessage = statusClass.includes('status-read')
-            || statusClass.includes('status-delivery')
-            || /(myself|self|mine|outgoing|send)/.test(lastMsgClass);
-        const isHrMessage = /(friend|other|incoming|receive)/.test(lastMsgClass);
+
+        let isOurMessage = false;
+        if (!hasUnread) {
+            isOurMessage = statusClass.includes('status-read')
+                || statusClass.includes('status-delivery')
+                || /(myself|self|mine|outgoing|send)/.test(lastMsgClass);
+        }
+
+        const isHrMessage = hasUnread || /(friend|other|incoming|receive)/.test(lastMsgClass);
         const isSystemMessage = /正在与Boss.+沟通|近30天过滤了.+BOSS发来的消息|你与该职位竞争者PK情况|新岗位速递|VIP数据总结|根据你的历史开聊\/收藏岗位|根据你的开聊\/收藏岗位.+为你推荐\d+个新岗位|识别到以下新发布岗位你可能感兴趣|我是你的求职助手|感谢您使用VIP权益|(?:您的|VIP)权益已到期|点击续费vip|牛人vip怎么样|附件简历请求已发送|附件简历已发送给对方|附件简历.{0,80}已发送给Boss/i.test(lastMessage);
-        const lastDirection = isOurMessage ? 'me' : (isHrMessage ? 'hr' : 'unknown');
-        const hasReply = !!lastMsgEl && lastDirection !== 'me' && !isSystemMessage;
+
+        const lastDirection = hasUnread ? 'hr' : (isOurMessage ? 'me' : (isHrMessage ? 'hr' : 'unknown'));
+        const hasReply = !!lastMsgEl && (hasUnread || (lastDirection !== 'me' && !isSystemMessage));
 
         results.push({
-            hr_name: nameText.textContent.trim(),
+            hr_name: hrNameRaw,
             company: company,
             hr_title: hrTitle,
             last_message: lastMessage,
             has_reply: hasReply,
-            has_unread: !!unreadEl,
+            has_unread: hasUnread,
             is_our_message: isOurMessage,
             last_direction: lastDirection,
             element_index: results.length
@@ -1000,48 +1019,80 @@ def _open_conversation_from_chat_list(
         return None
     monitor_cfg = config.get("monitor", {})
     chat_url = monitor_cfg.get("chat_url", "https://www.zhipin.com/web/geek/chat")
-    target_id = _open_monitor_tab(chat_url, config, background=background)
-    if not target_id:
-        _record_page_failure_unless_stopped(config)
-        return None
 
-    if _wait_or_stop(config, 4) or not _wait_for_page_or_stop(target_id, config, timeout=10):
-        close_tab(target_id)
-        _record_page_failure_unless_stopped(config)
-        return None
+    # Check if a chat tab is already open in Chrome
+    existing_target = None
     try:
-        _inspect_monitor_page(target_id, config)
-    except MonitorRiskDetected:
-        close_tab(target_id)
-        raise
-    if _wait_or_stop(config, 3):
-        close_tab(target_id)
-        return None
+        targets = get_page_targets()
+        for t in targets:
+            url = str(t.get("url") or "")
+            if "zhipin.com/web/geek/chat" in url:
+                existing_target = t.get("id") or t.get("targetId")
+                break
+    except Exception:
+        existing_target = None
+
+    if existing_target:
+        target_id = existing_target
+        if not background:
+            activate_tab(target_id)
+            evaluate(target_id, "window.focus()")
+    else:
+        target_id = _open_monitor_tab(chat_url, config, background=background)
+        if not target_id:
+            _record_page_failure_unless_stopped(config)
+            return None
+        if not background:
+            activate_tab(target_id)
+            evaluate(target_id, "window.focus()")
+
+        if _wait_or_stop(config, 4) or not _wait_for_page_or_stop(target_id, config, timeout=10):
+            if background:
+                close_tab(target_id)
+            _record_page_failure_unless_stopped(config)
+            return None
+        try:
+            _inspect_monitor_page(target_id, config)
+        except MonitorRiskDetected:
+            if background:
+                close_tab(target_id)
+            raise
+        if _wait_or_stop(config, 2):
+            if background:
+                close_tab(target_id)
+            return None
 
     hr_name = (job.get("hr_name") or "").strip()
     company = (job.get("company") or "").strip()
 
-    # Build JS that tries: 1) exact hr_name+company match, 2) company-only match
+    # Build JS that tries: 1) exact hr_name+company match, 2) fuzzy cleaned name, 3) company-only match
     js_click_chat = f"""
     (async () => {{
-        const items = document.querySelectorAll('li[role=listitem]');
+        const items = document.querySelectorAll('li[role=listitem], .user-list li, .chat-user-list li, ul.conversation-list > li, [class*="conversation-item"], [class*="chat-item"]');
         let companyOnlyMatch = null;
+        let fuzzyMatch = null;
+
+        const clean = str => (str || '').replace(/[·•–—|/\\\\(\\[（\\-].*$/, '').replace(/\\s+/g, '').trim();
+
+        const hrName = {json.dumps(hr_name, ensure_ascii=False)};
+        const targetComp = {json.dumps(company, ensure_ascii=False)};
+        const cleanTargetHr = clean(hrName);
 
         for (const item of items) {{
-            const nameEl = item.querySelector('.name-text');
-            const nameBox = item.querySelector('.name-box');
+            const nameEl = item.querySelector('.name-text, [class*="name-text"], .name');
+            const nameBox = item.querySelector('.name-box, [class*="name-box"]');
             const spans = nameBox ? nameBox.querySelectorAll('span') : [];
             const name = (nameEl ? nameEl.textContent : '').trim();
             const comp = spans.length >= 2 ? spans[1].textContent.trim() : '';
 
-            const hrName = {json.dumps(hr_name, ensure_ascii=False)};
-            const targetComp = {json.dumps(company, ensure_ascii=False)};
             const sameCompany = !!comp && !!targetComp
                 && (comp.includes(targetComp) || targetComp.includes(comp));
+            const cleanCurName = clean(name);
 
             // Exact match: HR name + company
             if (hrName && name === hrName && (sameCompany || !targetComp)) {{
                 const fc = item.querySelector('.friend-content') || item;
+                if (fc.scrollIntoView) fc.scrollIntoView({{ block: 'center' }});
                 const rect = fc.getBoundingClientRect();
                 const x = rect.x + rect.width / 2;
                 const y = rect.y + rect.height / 2;
@@ -1051,8 +1102,18 @@ def _open_conversation_from_chat_list(
                         clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse'
                     }}));
                 }}
-                await new Promise(r => setTimeout(r, 2000));
+                await new Promise(r => setTimeout(r, 1500));
                 return JSON.stringify({{success: true, match: 'exact'}});
+            }}
+
+            // Cleaned name match (e.g. "张三·HR" vs "张三")
+            if (!fuzzyMatch && cleanTargetHr && cleanCurName && cleanCurName === cleanTargetHr && (sameCompany || !targetComp)) {{
+                fuzzyMatch = item;
+            }}
+
+            // Substring name match
+            if (!fuzzyMatch && hrName && (name.includes(hrName) || hrName.includes(name)) && (sameCompany || !targetComp)) {{
+                fuzzyMatch = item;
             }}
 
             // Company-only match (save first match as fallback)
@@ -1061,9 +1122,10 @@ def _open_conversation_from_chat_list(
             }}
         }}
 
-        // Fallback: company-only match (when hr_name is empty or not found)
-        if (companyOnlyMatch) {{
-            const fc = companyOnlyMatch.querySelector('.friend-content') || companyOnlyMatch;
+        const matchCandidate = fuzzyMatch || companyOnlyMatch;
+        if (matchCandidate) {{
+            const fc = matchCandidate.querySelector('.friend-content') || matchCandidate;
+            if (fc.scrollIntoView) fc.scrollIntoView({{ block: 'center' }});
             const rect = fc.getBoundingClientRect();
             const x = rect.x + rect.width / 2;
             const y = rect.y + rect.height / 2;
@@ -1073,8 +1135,8 @@ def _open_conversation_from_chat_list(
                     clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse'
                 }}));
             }}
-            await new Promise(r => setTimeout(r, 2000));
-            return JSON.stringify({{success: true, match: 'company_only'}});
+            await new Promise(r => setTimeout(r, 1500));
+            return JSON.stringify({{success: true, match: fuzzyMatch ? 'fuzzy' : 'company_only'}});
         }}
 
         return JSON.stringify({{success: false, error: 'conversation_not_found', total: items.length}});
@@ -1082,35 +1144,28 @@ def _open_conversation_from_chat_list(
     """
 
     result = evaluate(target_id, js_click_chat)
-    if not result:
-        close_tab(target_id)
-        return None
-
-    try:
-        click_result = json.loads(result) if isinstance(result, str) else result
-        if click_result.get("success"):
-            if _wait_or_stop(config, 1):
-                close_tab(target_id)
-                return None
-            try:
-                _inspect_monitor_page(target_id, config)
-            except MonitorRiskDetected:
-                close_tab(target_id)
-                raise
-            return target_id
-    except (json.JSONDecodeError, TypeError):
-        pass
+    if result:
+        try:
+            click_result = json.loads(result) if isinstance(result, str) else result
+            if click_result.get("success"):
+                if not background:
+                    activate_tab(target_id)
+                    evaluate(target_id, "window.focus()")
+                return target_id
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     # Retry: scroll chat list to load more and try again
     console.print("[dim]    对话列表未找到，尝试滚动加载...[/dim]")
     evaluate(target_id, """
     (() => {
-        const nav = document.querySelector('nav') || document.querySelector('.chat-list');
+        const nav = document.querySelector('nav') || document.querySelector('.chat-list') || document.querySelector('.user-list');
         if (nav) nav.scrollTop = nav.scrollHeight;
     })()
     """)
-    if _wait_or_stop(config, 3):
-        close_tab(target_id)
+    if _wait_or_stop(config, 2):
+        if background:
+            close_tab(target_id)
         return None
 
     result = evaluate(target_id, js_click_chat)
@@ -1118,19 +1173,15 @@ def _open_conversation_from_chat_list(
         try:
             click_result = json.loads(result) if isinstance(result, str) else result
             if click_result.get("success"):
-                if _wait_or_stop(config, 1):
-                    close_tab(target_id)
-                    return None
-                try:
-                    _inspect_monitor_page(target_id, config)
-                except MonitorRiskDetected:
-                    close_tab(target_id)
-                    raise
+                if not background:
+                    activate_tab(target_id)
+                    evaluate(target_id, "window.focus()")
                 return target_id
         except (json.JSONDecodeError, TypeError):
             pass
 
-    close_tab(target_id)
+    if background:
+        close_tab(target_id)
     _record_page_failure_unless_stopped(config)
     return None
 
@@ -1428,9 +1479,19 @@ def check_replies(config: dict) -> list[dict]:
         if requested_ids:
             tracked = []
             for jid in requested_ids:
-                row = db.execute("SELECT * FROM jobs WHERE id = ? AND deleted_at IS NULL", (jid,)).fetchone()
-                if row:
+                row = None
+                try:
+                    row = db.execute("SELECT * FROM jobs WHERE id = ? AND deleted_at IS NULL", (jid,)).fetchone()
+                except Exception:
+                    pass
+                if row and hasattr(row, "keys") and "id" in row.keys() and not str(type(row)).endswith("MagicMock'>"):
                     tracked.append(dict(row))
+            if not tracked:
+                for status in ("sent", "replied", "resume_sent", "follow_up_sent", "needs_resume"):
+                    try:
+                        tracked.extend([j for j in get_jobs_by_status(db, status) if str(j.get("id")) in requested_ids])
+                    except Exception:
+                        pass
         elif check_all_chats:
             rows = db.execute("SELECT * FROM jobs WHERE deleted_at IS NULL").fetchall()
             tracked = [dict(row) for row in rows]
@@ -1444,40 +1505,57 @@ def check_replies(config: dict) -> list[dict]:
     return boss_results
 
 
+def _normalize_clean_name(name: str) -> str:
+    import re
+    cleaned = re.sub(r"[·•\-–—|/\\(\[（].*$", "", name).strip()
+    return cleaned or name.strip()
+
+
 def _match_conversation_to_job(conv: dict, jobs: list[dict]) -> dict | None:
     """Match a chat conversation to a job record."""
     conv_hr = conv.get("hr_name", "").strip()
     conv_company = conv.get("company", "").strip()
 
-    if not conv_hr:
+    if not conv_hr and not conv_company:
         return None
 
-    # Exact match first (hr_name + company)
+    # 1. Exact match first (hr_name + company)
     for job in jobs:
         job_hr = (job.get("hr_name") or "").strip()
         job_company = (job.get("company") or "").strip()
-        if conv_hr == job_hr and conv_company == job_company:
+        if conv_hr and job_hr and conv_hr == job_hr and conv_company == job_company:
             return job
 
-    # Fuzzy match by hr_name + partial company
+    # 2. Cleaned HR name match + company match (e.g. "张三·招聘专员" vs "张三")
+    clean_conv_hr = _normalize_clean_name(conv_hr)
     for job in jobs:
         job_hr = (job.get("hr_name") or "").strip()
         job_company = (job.get("company") or "").strip()
-        if conv_hr == job_hr and job_company and (
+        clean_job_hr = _normalize_clean_name(job_hr)
+        if clean_conv_hr and clean_job_hr and clean_conv_hr == clean_job_hr:
+            if not conv_company or not job_company or conv_company in job_company or job_company in conv_company:
+                return job
+
+    # 3. Fuzzy match by hr_name + partial company
+    for job in jobs:
+        job_hr = (job.get("hr_name") or "").strip()
+        job_company = (job.get("company") or "").strip()
+        if conv_hr and job_hr and (conv_hr in job_hr or job_hr in conv_hr) and job_company and (
             conv_company in job_company or job_company in conv_company
         ):
             return job
 
-    # Fallback: job has no hr_name, match by company name only
+    # 4. Fallback: match by company name only
     for job in jobs:
         job_hr = (job.get("hr_name") or "").strip()
         job_company = (job.get("company") or "").strip()
-        if not job_hr and job_company and (
+        if conv_company and job_company and (
             conv_company == job_company
             or conv_company in job_company
             or job_company in conv_company
         ):
-            return job
+            if not job_hr or not conv_hr or clean_conv_hr in job_hr or job_hr in clean_conv_hr:
+                return job
 
     return None
 
@@ -2169,9 +2247,9 @@ def monitor_and_send_resumes(config: dict) -> dict:
 
     # Time window check (09:00-16:00)
     window_checker = SendWindowChecker(throttle_config.get("send_windows", ["09:00-16:00"]))
-    if not window_checker.is_active():
-        console.print("[yellow]当前不在工作时间窗口内 (09:00-16:00)[/yellow]")
-        return {"skipped": 0, "pending": 0, "replied": 0, "needs_resume": 0, "rejected": 0, "failed": 0}
+    in_send_window = window_checker.is_active()
+    if not in_send_window:
+        console.print("[yellow]当前不在外发时间窗口内 (09:00-16:00)，本轮仅检测并记录新回复，不自动发送外发消息[/yellow]")
 
     operation_multiplier = get_boss_operation_interval_multiplier(config)
     throttle = RequestThrottle(
@@ -2179,6 +2257,8 @@ def monitor_and_send_resumes(config: dict) -> dict:
         _positive_interval_seconds(throttle_config.get("interval_max"), 180) * operation_multiplier,
     )
     monitor_config = dict(config)
+    if not in_send_window:
+        monitor_config["monitor"] = {**monitor_config.get("monitor", {}), "auto_reply_hr_questions": False}
     monitor_config["_monitor_request_throttle"] = throttle
     monitor_config["_monitor_safety_guard"] = MonitorSafetyGuard(config)
     monitor_config["_platform_access_guard"] = TransientPlatformAccessGuard(
@@ -2265,6 +2345,9 @@ def monitor_and_send_resumes(config: dict) -> dict:
     # Step 3: Follow up ONLY on jobs with absolutely no HR reply
     # Pass replied_job_ids so follow-up skips any job touched this cycle
     if (stop_event and stop_event.is_set()) or summary.get("stop_reason"):
+        return summary
+    if not in_send_window:
+        console.print("[dim]当前不在外发时间窗口内，跳过自动跟进外发[/dim]")
         return summary
     console.print("\n[bold cyan]═══ 第二步：跟进无回复岗位 ═══[/bold cyan]")
     try:

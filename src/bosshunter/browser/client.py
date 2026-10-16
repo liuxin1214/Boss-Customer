@@ -33,6 +33,9 @@ class RuntimeClient:
     def close_tab(self, target_id: str) -> bool:
         return self._get_ok("/close", params={"target": target_id}, timeout=5)
 
+    def activate_tab(self, target_id: str) -> bool:
+        return self._get_ok("/activate", params={"target": target_id}, timeout=5)
+
     def navigate(self, target_id: str, url: str) -> bool:
         return self._get_ok("/navigate", params={"target": target_id, "url": url}, timeout=15)
 

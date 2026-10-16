@@ -1480,7 +1480,7 @@ function ExportMenu({
   )
 }
 
-type MonitorFilter = 'pending' | 'resume' | 'follow_up' | 'replied'
+type MonitorFilter = 'pending' | 'resume' | 'follow_up' | 'replied' | 'failure'
 const REPLY_RESOLUTION_ACTIONS = ['reply_dismissed', 'replied', 'auto_replied']
 const DETECTION_RESOLUTION_ACTIONS = [
   ...REPLY_RESOLUTION_ACTIONS,
@@ -1746,14 +1746,19 @@ function MonitorExecutionView({
   const resumeFailures = uniqueLatestByJob(history.filter(item =>
     item.action === 'resume_failed' && !isResumeFailureResolved(item, history)
   ))
+  const failureRecords = uniqueLatestByJob(history.filter(item =>
+    item.action === 'resume_failed'
+    || item.action === 'error'
+    || Boolean(parseHistoryDetail(item).systemReason)
+  ))
   const pendingItems = uniqueLatestByJob(
-    [...detectedReplies, ...pendingReplies, ...resumeFailures].sort((left, right) => right.id - left.id)
+    [...detectedReplies, ...pendingReplies].sort((left, right) => right.id - left.id)
   )
   const pendingResumeRequests = history.filter(item =>
     item.action === 'needs_resume' && !isResumeRequestResolved(item, history)
   )
   const resumeRequests = uniqueLatestByJob(
-    [...pendingResumeRequests, ...resumeFailures].sort((left, right) => right.id - left.id)
+    pendingResumeRequests.sort((left, right) => right.id - left.id)
   )
   const followUpRecords = uniqueLatestByJob(history.filter(item => item.action === 'follow_up_sent'))
   const repliedRecords = history.filter(isOutboundReplyRecord)
@@ -1764,8 +1769,10 @@ function MonitorExecutionView({
       ? followUpRecords
       : activeMonitorFilter === 'replied'
         ? repliedRecords
-        : pendingItems
-  const displayedHistory = activeMonitorFilter === 'pending' || activeMonitorFilter === 'resume'
+        : activeMonitorFilter === 'failure'
+          ? failureRecords
+          : pendingItems
+  const displayedHistory = activeMonitorFilter === 'pending' || activeMonitorFilter === 'resume' || activeMonitorFilter === 'failure'
     ? visibleHistory
     : visibleHistory.slice(0, 8)
   const [replyDrafts, setReplyDrafts] = useState<Record<number, string>>({})
@@ -2064,6 +2071,7 @@ function MonitorExecutionView({
           { key: 'resume' as const, label: '简历请求', count: resumeRequests.length },
           { key: 'follow_up' as const, label: '自动跟进', count: followUpRecords.length },
           { key: 'replied' as const, label: '已回复', count: repliedRecords.length },
+          { key: 'failure' as const, label: '失败情况', count: failureRecords.length },
         ].map(item => {
           const active = activeMonitorFilter === item.key
           return (
@@ -2085,14 +2093,15 @@ function MonitorExecutionView({
           const isFollowUp = item.action === 'follow_up_sent'
           const isDetectedReply = item.action === 'hr_reply_detected'
           const isResumeFailure = item.action === 'resume_failed'
-          const isResumeRequest = item.action === 'needs_resume' || isResumeFailure
-          const isReplied = isOutboundReplyRecord(item)
           const parsed = parseHistoryDetail(item)
+          const isSystemFailure = isResumeFailure || item.action === 'error' || Boolean(parsed.systemReason)
+          const isResumeRequest = item.action === 'needs_resume'
+          const isReplied = isOutboundReplyRecord(item)
           const hasGeneratedReply = !isDetectedReply && Boolean(parsed.aiReply)
           const detectedReplyPreview = isDetectedReply ? item.detail.replace(/^HR回复:\s*/, '') : ''
           const conversationMessages = monitorConversationMessages(item, history)
-          const showReplyContent = canReply || Boolean(parsed.hrQuestion) || hasGeneratedReply || isResumeRequest || isReplied || conversationMessages.length > 0
-          const systemFailureReason = parsed.systemReason || (isResumeFailure ? '未获得更具体的错误信息，请查看运行日志。' : '')
+          const showReplyContent = canReply || Boolean(parsed.hrQuestion) || hasGeneratedReply || isResumeRequest || isReplied || isSystemFailure || conversationMessages.length > 0
+          const systemFailureReason = parsed.systemReason || (isResumeFailure ? '定制简历生成失败，请检查提示词或网络' : (item.action === 'error' ? (item.detail || '系统执行出错') : '未获得更具体的错误信息，请查看运行日志。'))
           const targetUrl = monitorChatUrl(item)
           const openingChat = openingChatId === item.id
           const preparingReply = preparingReplyId === item.id
@@ -2137,7 +2146,7 @@ function MonitorExecutionView({
                         </div>
                       </div>
                     )}
-                    {isResumeFailure && (
+                    {isSystemFailure && (
                       <div className="rounded-2xl border border-danger/30 bg-red-50 p-3">
                         <div className="text-xs font-black text-danger">系统失败原因</div>
                         <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-danger">{systemFailureReason}</p>
@@ -2167,7 +2176,9 @@ function MonitorExecutionView({
                 ) : item.action === 'resume_sent' ? (
                   <p className="mt-2 text-xs text-primary">已回复：定制简历已发送，本轮聊天记录保留在上方。</p>
                 ) : isResumeFailure ? (
-                  <p className="mt-2 text-xs text-danger">待处理：定制简历生成失败，尚无可下载文件，请手动处理或稍后重试生成。</p>
+                  <p className="mt-2 text-xs text-danger">失败情况：定制简历生成失败，尚无可下载文件，请手动处理或稍后重试生成。</p>
+                ) : isSystemFailure ? (
+                  <p className="mt-2 text-xs text-danger">失败情况：{systemFailureReason}。可点击右侧定位聊天并手动处理。</p>
                 ) : isReplied ? (
                   <p className="mt-2 text-xs text-primary">已回答：本轮 HR 与 AI 回复已保留在上方聊天记录中。</p>
                 ) : null}
@@ -2191,6 +2202,8 @@ function MonitorExecutionView({
                     <Button variant="secondary" size="sm" onClick={() => document.getElementById(`reply-draft-${item.id}`)?.focus()}>编辑回复</Button>
                     <Button variant="secondary" size="sm" onClick={() => dismissPendingReply(item)}>放弃</Button>
                   </>
+                ) : isSystemFailure ? (
+                  <div className="px-2 py-1 text-center text-xs font-bold text-danger">系统执行失败</div>
                 ) : (
                   <div className="px-2 py-1 text-center text-xs text-muted">本轮已处理，无需再次确认</div>
                 )}
@@ -2200,7 +2213,15 @@ function MonitorExecutionView({
         })}
         {!visibleHistory.length && (
           <div className="rounded-2xl border border-dashed border-card-border bg-[#FFFCFA] p-5 text-sm text-muted">
-            {activeMonitorFilter === 'replied' ? '暂无近 7 天已回复对话。' : '暂无待处理 HR 问题。'}
+            {activeMonitorFilter === 'replied'
+              ? '暂无近 7 天已回复对话。'
+              : activeMonitorFilter === 'failure'
+                ? '暂无失败情况记录。'
+                : activeMonitorFilter === 'resume'
+                  ? '暂无待发送简历请求。'
+                  : activeMonitorFilter === 'follow_up'
+                    ? '暂无自动跟进记录。'
+                    : '暂无待处理 HR 问题。'}
           </div>
         )}
       </div>

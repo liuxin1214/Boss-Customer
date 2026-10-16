@@ -73,6 +73,13 @@ def close_tab(target_id: str) -> bool:
     return _client().close_tab(target_id)
 
 
+def activate_tab(target_id: str) -> bool:
+    """Activate (bring to front) a tab by target ID."""
+    if not _ready():
+        return False
+    return _client().activate_tab(target_id)
+
+
 def navigate(target_id: str, url: str) -> bool:
     """Navigate a tab to a URL."""
     if not _ready():
